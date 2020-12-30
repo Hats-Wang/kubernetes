@@ -50,7 +50,7 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // DeletionTimeout sets maximum time from the moment a pod is added to DisruptedPods in PDB.Status
@@ -140,13 +140,12 @@ func NewDisruptionController(
 	dc.podLister = podInformer.Lister()
 	dc.podListerSynced = podInformer.Informer().HasSynced
 
-	pdbInformer.Informer().AddEventHandlerWithResyncPeriod(
+	pdbInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    dc.addDb,
 			UpdateFunc: dc.updateDb,
 			DeleteFunc: dc.removeDb,
 		},
-		30*time.Second,
 	)
 	dc.pdbLister = pdbInformer.Lister()
 	dc.pdbListerSynced = pdbInformer.Informer().HasSynced
@@ -599,7 +598,7 @@ func (dc *DisruptionController) getExpectedPodCount(pdb *policy.PodDisruptionBud
 			return
 		}
 		var maxUnavailable int
-		maxUnavailable, err = intstr.GetValueFromIntOrPercent(pdb.Spec.MaxUnavailable, int(expectedCount), true)
+		maxUnavailable, err = intstr.GetScaledValueFromIntOrPercent(pdb.Spec.MaxUnavailable, int(expectedCount), true)
 		if err != nil {
 			return
 		}
@@ -618,7 +617,7 @@ func (dc *DisruptionController) getExpectedPodCount(pdb *policy.PodDisruptionBud
 			}
 
 			var minAvailable int
-			minAvailable, err = intstr.GetValueFromIntOrPercent(pdb.Spec.MinAvailable, int(expectedCount), true)
+			minAvailable, err = intstr.GetScaledValueFromIntOrPercent(pdb.Spec.MinAvailable, int(expectedCount), true)
 			if err != nil {
 				return
 			}
@@ -689,7 +688,6 @@ func (dc *DisruptionController) getExpectedScale(pdb *policy.PodDisruptionBudget
 }
 
 func countHealthyPods(pods []*v1.Pod, disruptedPods map[string]metav1.Time, currentTime time.Time) (currentHealthy int32) {
-Pod:
 	for _, pod := range pods {
 		// Pod is being deleted.
 		if pod.DeletionTimestamp != nil {
@@ -701,7 +699,6 @@ Pod:
 		}
 		if podutil.IsPodReady(pod) {
 			currentHealthy++
-			continue Pod
 		}
 	}
 

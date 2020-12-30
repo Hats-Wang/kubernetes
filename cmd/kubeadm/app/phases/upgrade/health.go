@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/images"
@@ -208,21 +208,34 @@ func deleteHealthCheckJob(client clientset.Interface, ns, jobName string) error 
 
 // controlPlaneNodesReady checks whether all control-plane Nodes in the cluster are in the Running state
 func controlPlaneNodesReady(client clientset.Interface, _ *kubeadmapi.ClusterConfiguration) error {
-	selector := labels.SelectorFromSet(labels.Set(map[string]string{
-		constants.LabelNodeRoleMaster: "",
+	// list nodes labeled with a "master" node-role
+	selectorOldControlPlane := labels.SelectorFromSet(labels.Set(map[string]string{
+		constants.LabelNodeRoleOldControlPlane: "",
 	}))
-	controlPlanes, err := client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
-		LabelSelector: selector.String(),
+	nodesWithOldLabel, err := client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
+		LabelSelector: selectorOldControlPlane.String(),
 	})
 	if err != nil {
-		return errors.Wrap(err, "couldn't list control-planes in cluster")
+		return errors.Wrapf(err, "could not list nodes labeled with %q", constants.LabelNodeRoleOldControlPlane)
 	}
 
-	if len(controlPlanes.Items) == 0 {
+	// list nodes labeled with a "control-plane" node-role
+	selectorControlPlane := labels.SelectorFromSet(labels.Set(map[string]string{
+		constants.LabelNodeRoleControlPlane: "",
+	}))
+	nodesControlPlane, err := client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
+		LabelSelector: selectorControlPlane.String(),
+	})
+	if err != nil {
+		return errors.Wrapf(err, "could not list nodes labeled with %q", constants.LabelNodeRoleControlPlane)
+	}
+
+	nodes := append(nodesWithOldLabel.Items, nodesControlPlane.Items...)
+	if len(nodes) == 0 {
 		return errors.New("failed to find any nodes with a control-plane role")
 	}
 
-	notReadyControlPlanes := getNotReadyNodes(controlPlanes.Items)
+	notReadyControlPlanes := getNotReadyNodes(nodes)
 	if len(notReadyControlPlanes) != 0 {
 		return errors.Errorf("there are NotReady control-planes in the cluster: %v", notReadyControlPlanes)
 	}

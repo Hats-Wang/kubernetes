@@ -50,7 +50,7 @@ import (
 	api "k8s.io/kubernetes/pkg/apis/core"
 	extensionsinternal "k8s.io/kubernetes/pkg/apis/extensions"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -635,37 +635,27 @@ func (config *RCConfig) create() error {
 }
 
 func (config *RCConfig) applyTo(template *v1.PodTemplateSpec) {
-	if config.Env != nil {
-		for k, v := range config.Env {
-			c := &template.Spec.Containers[0]
-			c.Env = append(c.Env, v1.EnvVar{Name: k, Value: v})
-		}
+	for k, v := range config.Env {
+		c := &template.Spec.Containers[0]
+		c.Env = append(c.Env, v1.EnvVar{Name: k, Value: v})
 	}
-	if config.Labels != nil {
-		for k, v := range config.Labels {
-			template.ObjectMeta.Labels[k] = v
-		}
+	for k, v := range config.Labels {
+		template.ObjectMeta.Labels[k] = v
 	}
-	if config.NodeSelector != nil {
-		template.Spec.NodeSelector = make(map[string]string)
-		for k, v := range config.NodeSelector {
-			template.Spec.NodeSelector[k] = v
-		}
+	template.Spec.NodeSelector = make(map[string]string)
+	for k, v := range config.NodeSelector {
+		template.Spec.NodeSelector[k] = v
 	}
 	if config.Tolerations != nil {
 		template.Spec.Tolerations = append([]v1.Toleration{}, config.Tolerations...)
 	}
-	if config.Ports != nil {
-		for k, v := range config.Ports {
-			c := &template.Spec.Containers[0]
-			c.Ports = append(c.Ports, v1.ContainerPort{Name: k, ContainerPort: int32(v)})
-		}
+	for k, v := range config.Ports {
+		c := &template.Spec.Containers[0]
+		c.Ports = append(c.Ports, v1.ContainerPort{Name: k, ContainerPort: int32(v)})
 	}
-	if config.HostPorts != nil {
-		for k, v := range config.HostPorts {
-			c := &template.Spec.Containers[0]
-			c.Ports = append(c.Ports, v1.ContainerPort{Name: k, ContainerPort: int32(v), HostPort: int32(v)})
-		}
+	for k, v := range config.HostPorts {
+		c := &template.Spec.Containers[0]
+		c.Ports = append(c.Ports, v1.ContainerPort{Name: k, ContainerPort: int32(v), HostPort: int32(v)})
 	}
 	if config.CpuLimit > 0 || config.MemLimit > 0 || config.GpuLimit > 0 {
 		template.Spec.Containers[0].Resources.Limits = v1.ResourceList{}
@@ -941,7 +931,7 @@ type CountToStrategy struct {
 }
 
 type TestNodePreparer interface {
-	PrepareNodes() error
+	PrepareNodes(nextNodeIndex int) error
 	CleanupNodes() error
 }
 
@@ -1379,11 +1369,28 @@ func CreatePodWithPersistentVolume(client clientset.Interface, namespace string,
 			pv.Status.Phase = v1.VolumeBound
 
 			// bind pvc to "pv-$i"
-			// pvc.Spec.VolumeName = pv.Name
+			pvc.Spec.VolumeName = pv.Name
 			pvc.Status.Phase = v1.ClaimBound
 		} else {
 			pv.Status.Phase = v1.VolumeAvailable
 		}
+
+		// Create PVC first as it's referenced by the PV when the `bindVolume` is true.
+		if err := CreatePersistentVolumeClaimWithRetries(client, namespace, pvc); err != nil {
+			lock.Lock()
+			defer lock.Unlock()
+			createError = fmt.Errorf("error creating PVC: %s", err)
+			return
+		}
+
+		// We need to update statuses separately, as creating pv/pvc resets status to the default one.
+		if _, err := client.CoreV1().PersistentVolumeClaims(namespace).UpdateStatus(context.TODO(), pvc, metav1.UpdateOptions{}); err != nil {
+			lock.Lock()
+			defer lock.Unlock()
+			createError = fmt.Errorf("error updating PVC status: %s", err)
+			return
+		}
+
 		if err := CreatePersistentVolumeWithRetries(client, pv); err != nil {
 			lock.Lock()
 			defer lock.Unlock()
@@ -1395,19 +1402,6 @@ func CreatePodWithPersistentVolume(client clientset.Interface, namespace string,
 			lock.Lock()
 			defer lock.Unlock()
 			createError = fmt.Errorf("error updating PV status: %s", err)
-			return
-		}
-
-		if err := CreatePersistentVolumeClaimWithRetries(client, namespace, pvc); err != nil {
-			lock.Lock()
-			defer lock.Unlock()
-			createError = fmt.Errorf("error creating PVC: %s", err)
-			return
-		}
-		if _, err := client.CoreV1().PersistentVolumeClaims(namespace).UpdateStatus(context.TODO(), pvc, metav1.UpdateOptions{}); err != nil {
-			lock.Lock()
-			defer lock.Unlock()
-			createError = fmt.Errorf("error updating PVC status: %s", err)
 			return
 		}
 

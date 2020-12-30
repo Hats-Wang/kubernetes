@@ -20,9 +20,10 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/onsi/ginkgo"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -33,7 +34,7 @@ import (
 	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
 )
 
-const etcdImage = "3.4.7-0"
+const etcdImage = "3.4.13-0"
 
 // EtcdUpgrade upgrades etcd on GCE.
 func EtcdUpgrade(targetStorage, targetVersion string) error {
@@ -45,20 +46,6 @@ func EtcdUpgrade(targetStorage, targetVersion string) error {
 	}
 }
 
-// MasterUpgrade upgrades master node on GCE/GKE.
-func MasterUpgrade(f *Framework, v string) error {
-	switch TestContext.Provider {
-	case "gce":
-		return masterUpgradeGCE(v, false)
-	case "gke":
-		return MasterUpgradeGKE(f.Namespace.Name, v)
-	case "kubernetes-anywhere":
-		return masterUpgradeKubernetesAnywhere(v)
-	default:
-		return fmt.Errorf("MasterUpgrade() is not implemented for provider %s", TestContext.Provider)
-	}
-}
-
 func etcdUpgradeGCE(targetStorage, targetVersion string) error {
 	env := append(
 		os.Environ(),
@@ -67,32 +54,6 @@ func etcdUpgradeGCE(targetStorage, targetVersion string) error {
 		"TEST_ETCD_IMAGE="+etcdImage)
 
 	_, _, err := RunCmdEnv(env, GCEUpgradeScript(), "-l", "-M")
-	return err
-}
-
-// MasterUpgradeGCEWithKubeProxyDaemonSet upgrades master node on GCE with enabling/disabling the daemon set of kube-proxy.
-// TODO(mrhohn): Remove this function when kube-proxy is run as a DaemonSet by default.
-func MasterUpgradeGCEWithKubeProxyDaemonSet(v string, enableKubeProxyDaemonSet bool) error {
-	return masterUpgradeGCE(v, enableKubeProxyDaemonSet)
-}
-
-// TODO(mrhohn): Remove 'enableKubeProxyDaemonSet' when kube-proxy is run as a DaemonSet by default.
-func masterUpgradeGCE(rawV string, enableKubeProxyDaemonSet bool) error {
-	env := append(os.Environ(), fmt.Sprintf("KUBE_PROXY_DAEMONSET=%v", enableKubeProxyDaemonSet))
-	// TODO: Remove these variables when they're no longer needed for downgrades.
-	if TestContext.EtcdUpgradeVersion != "" && TestContext.EtcdUpgradeStorage != "" {
-		env = append(env,
-			"TEST_ETCD_VERSION="+TestContext.EtcdUpgradeVersion,
-			"STORAGE_BACKEND="+TestContext.EtcdUpgradeStorage,
-			"TEST_ETCD_IMAGE="+etcdImage)
-	} else {
-		// In e2e tests, we skip the confirmation prompt about
-		// implicit etcd upgrades to simulate the user entering "y".
-		env = append(env, "TEST_ALLOW_IMPLICIT_ETCD_UPGRADE=true")
-	}
-
-	v := "v" + rawV
-	_, _, err := RunCmdEnv(env, GCEUpgradeScript(), "-M", v)
 	return err
 }
 
@@ -134,43 +95,6 @@ func MasterUpgradeGKE(namespace string, v string) error {
 	}
 
 	WaitForSSHTunnels(namespace)
-
-	return nil
-}
-
-func masterUpgradeKubernetesAnywhere(v string) error {
-	Logf("Upgrading master to %q", v)
-
-	kaPath := TestContext.KubernetesAnywherePath
-	originalConfigPath := filepath.Join(kaPath, ".config")
-	backupConfigPath := filepath.Join(kaPath, ".config.bak")
-	updatedConfigPath := filepath.Join(kaPath, fmt.Sprintf(".config-%s", v))
-
-	// modify config with specified k8s version
-	if _, _, err := RunCmd("sed",
-		"-i.bak", // writes original to .config.bak
-		fmt.Sprintf(`s/kubernetes_version=.*$/kubernetes_version=%q/`, v),
-		originalConfigPath); err != nil {
-		return err
-	}
-
-	defer func() {
-		// revert .config.bak to .config
-		if err := os.Rename(backupConfigPath, originalConfigPath); err != nil {
-			Logf("Could not rename %s back to %s", backupConfigPath, originalConfigPath)
-		}
-	}()
-
-	// invoke ka upgrade
-	if _, _, err := RunCmd("make", "-C", TestContext.KubernetesAnywherePath,
-		"WAIT_FOR_KUBECONFIG=y", "upgrade-master"); err != nil {
-		return err
-	}
-
-	// move .config to .config.<version>
-	if err := os.Rename(originalConfigPath, updatedConfigPath); err != nil {
-		return err
-	}
 
 	return nil
 }
@@ -239,6 +163,7 @@ func (k *NodeKiller) kill(nodes []v1.Node) {
 	for _, node := range nodes {
 		node := node
 		go func() {
+			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
 
 			Logf("Stopping docker and kubelet on %q to simulate failure", node.Name)

@@ -18,7 +18,6 @@ package network
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"net"
@@ -35,6 +34,7 @@ import (
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	netutils "k8s.io/utils/net"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -42,15 +42,14 @@ import (
 
 var kubeProxyE2eImage = imageutils.GetE2EImage(imageutils.Agnhost)
 
-var _ = SIGDescribe("Network", func() {
+var _ = SIGDescribe("KubeProxy", func() {
 	const (
-		testDaemonHTTPPort     = 11301
-		testDaemonTCPPort      = 11302
-		deadlineTimeoutSeconds = 5
-		postFinTimeoutSeconds  = 15
+		testDaemonHTTPPort    = 11301
+		testDaemonTCPPort     = 11302
+		postFinTimeoutSeconds = 30
 	)
 
-	fr := framework.NewDefaultFramework("network")
+	fr := framework.NewDefaultFramework("kube-proxy")
 
 	ginkgo.It("should set TCP CLOSE_WAIT timeout [Privileged]", func() {
 		nodes, err := e2enode.GetBoundedReadySchedulableNodes(fr.ClientSet, 2)
@@ -61,13 +60,20 @@ var _ = SIGDescribe("Network", func() {
 				len(nodes.Items))
 		}
 
-		ips := e2enode.CollectAddresses(nodes, v1.NodeInternalIP)
-
 		type NodeInfo struct {
 			node   *v1.Node
 			name   string
 			nodeIP string
 		}
+
+		var family v1.IPFamily
+		if framework.TestContext.ClusterIsIPv6() {
+			family = v1.IPv6Protocol
+		} else {
+			family = v1.IPv4Protocol
+		}
+
+		ips := e2enode.GetAddressesByTypeAndFamily(&nodes.Items[0], v1.NodeInternalIP, family)
 
 		clientNodeInfo := NodeInfo{
 			node:   &nodes.Items[0],
@@ -75,17 +81,15 @@ var _ = SIGDescribe("Network", func() {
 			nodeIP: ips[0],
 		}
 
+		ips = e2enode.GetAddressesByTypeAndFamily(&nodes.Items[1], v1.NodeInternalIP, family)
+
 		serverNodeInfo := NodeInfo{
 			node:   &nodes.Items[1],
 			name:   nodes.Items[1].Name,
-			nodeIP: ips[1],
+			nodeIP: ips[0],
 		}
 
-		zero := int64(0)
-
 		// Create a pod to check the conntrack entries on the host node
-		// It mounts the host /proc/net folder to be able to access
-		// the nf_conntrack file with the host conntrack entries
 		privileged := true
 
 		hostExecPod := &v1.Pod{
@@ -100,44 +104,17 @@ var _ = SIGDescribe("Network", func() {
 				Containers: []v1.Container{
 					{
 						Name:            "e2e-net-exec",
-						Image:           kubeProxyE2eImage,
-						ImagePullPolicy: "Always",
-						Args:            []string{"pause"},
-						VolumeMounts: []v1.VolumeMount{
-							{
-								Name:      "proc-net",
-								MountPath: "/rootfs/proc/net",
-								ReadOnly:  true,
-							},
-						},
+						Image:           imageutils.GetE2EImage(imageutils.DebianIptables),
+						ImagePullPolicy: v1.PullIfNotPresent,
+						Command:         []string{"sleep", "600"},
 						SecurityContext: &v1.SecurityContext{
 							Privileged: &privileged,
 						},
 					},
 				},
-				Volumes: []v1.Volume{
-					{
-						Name: "proc-net",
-						VolumeSource: v1.VolumeSource{
-							HostPath: &v1.HostPathVolumeSource{
-								Path: "/proc/net",
-							},
-						},
-					},
-				},
-				TerminationGracePeriodSeconds: &zero,
 			},
 		}
 		fr.PodClient().CreateSync(hostExecPod)
-		defer fr.PodClient().DeleteSync(hostExecPod.Name, metav1.DeleteOptions{}, framework.DefaultPodDeletionTimeout)
-
-		// Some distributions (Ubuntu 16.04 etc.) don't support the proc file.
-		_, err = framework.RunHostCmd(fr.Namespace.Name, "e2e-net-exec",
-			"ls /rootfs/proc/net/nf_conntrack")
-		if err != nil && strings.Contains(err.Error(), "No such file or directory") {
-			e2eskipper.Skipf("The node %s does not support /proc/net/nf_conntrack", clientNodeInfo.name)
-		}
-		framework.ExpectNoError(err)
 
 		// Create the client and server pods
 		clientPodSpec := &v1.Pod{
@@ -152,7 +129,7 @@ var _ = SIGDescribe("Network", func() {
 					{
 						Name:            "e2e-net-client",
 						Image:           kubeProxyE2eImage,
-						ImagePullPolicy: "Always",
+						ImagePullPolicy: v1.PullIfNotPresent,
 						Args: []string{
 							"net",
 							"--runner", "nat-closewait-client",
@@ -160,11 +137,10 @@ var _ = SIGDescribe("Network", func() {
 							fmt.Sprintf(`{"RemoteAddr":"%v", "PostFinTimeoutSeconds":%v, "TimeoutSeconds":%v, "LeakConnection":true}`,
 								net.JoinHostPort(serverNodeInfo.nodeIP, strconv.Itoa(testDaemonTCPPort)),
 								postFinTimeoutSeconds,
-								deadlineTimeoutSeconds),
+								0),
 						},
 					},
 				},
-				TerminationGracePeriodSeconds: &zero,
 			},
 		}
 
@@ -180,7 +156,7 @@ var _ = SIGDescribe("Network", func() {
 					{
 						Name:            "e2e-net-server",
 						Image:           kubeProxyE2eImage,
-						ImagePullPolicy: "Always",
+						ImagePullPolicy: v1.PullIfNotPresent,
 						Args: []string{
 							"net",
 							"--runner", "nat-closewait-server",
@@ -198,7 +174,6 @@ var _ = SIGDescribe("Network", func() {
 						},
 					},
 				},
-				TerminationGracePeriodSeconds: &zero,
 			},
 		}
 
@@ -208,11 +183,10 @@ var _ = SIGDescribe("Network", func() {
 			serverNodeInfo.nodeIP,
 			kubeProxyE2eImage))
 		fr.PodClient().CreateSync(serverPodSpec)
-		defer fr.PodClient().DeleteSync(serverPodSpec.Name, metav1.DeleteOptions{}, framework.DefaultPodDeletionTimeout)
 
 		// The server should be listening before spawning the client pod
 		if readyErr := e2epod.WaitForPodsReady(fr.ClientSet, fr.Namespace.Name, serverPodSpec.Name, 0); readyErr != nil {
-			framework.Failf("error waiting for server pod %s to be ready: %w", serverPodSpec.Name, readyErr)
+			framework.Failf("error waiting for server pod %s to be ready: %v", serverPodSpec.Name, readyErr)
 		}
 		// Connect to the server and leak the connection
 		ginkgo.By(fmt.Sprintf(
@@ -221,23 +195,26 @@ var _ = SIGDescribe("Network", func() {
 			clientNodeInfo.nodeIP,
 			kubeProxyE2eImage))
 		fr.PodClient().CreateSync(clientPodSpec)
-		defer fr.PodClient().DeleteSync(clientPodSpec.Name, metav1.DeleteOptions{}, framework.DefaultPodDeletionTimeout)
 
-		ginkgo.By("Checking /proc/net/nf_conntrack for the timeout")
+		ginkgo.By("Checking conntrack entries for the timeout")
 		// These must be synchronized from the default values set in
 		// pkg/apis/../defaults.go ConntrackTCPCloseWaitTimeout. The
 		// current defaults are hidden in the initialization code.
 		const epsilonSeconds = 60
 		const expectedTimeoutSeconds = 60 * 60
 		// the conntrack file uses the IPv6 expanded format
-		ip := fullIPv6(net.ParseIP(serverNodeInfo.nodeIP))
+		ip := serverNodeInfo.nodeIP
+		ipFamily := "ipv4"
+		if netutils.IsIPv6String(ip) {
+			ipFamily = "ipv6"
+		}
 		// Obtain the corresponding conntrack entry on the host checking
 		// the nf_conntrack file from the pod e2e-net-exec.
 		// It retries in a loop if the entry is not found.
-		cmd := fmt.Sprintf("cat /rootfs/proc/net/nf_conntrack "+
-			"| grep -m 1 'CLOSE_WAIT.*dst=%v.*dport=%v' ",
-			ip, testDaemonTCPPort)
-		if err := wait.PollImmediate(deadlineTimeoutSeconds, postFinTimeoutSeconds, func() (bool, error) {
+		cmd := fmt.Sprintf("conntrack -L -f %s -d %v"+
+			"| grep -m 1 'CLOSE_WAIT.*dport=%v' ",
+			ipFamily, ip, testDaemonTCPPort)
+		if err := wait.PollImmediate(1*time.Second, postFinTimeoutSeconds, func() (bool, error) {
 			result, err := framework.RunHostCmd(fr.Namespace.Name, "e2e-net-exec", cmd)
 			// retry if we can't obtain the conntrack entry
 			if err != nil {
@@ -245,22 +222,21 @@ var _ = SIGDescribe("Network", func() {
 				return false, nil
 			}
 			framework.Logf("conntrack entry for node %v and port %v:  %v", serverNodeInfo.nodeIP, testDaemonTCPPort, result)
-			// Timeout in seconds is available as the fifth column of
-			// the matched entry in /proc/net/nf_conntrack.
+			// Timeout in seconds is available as the third column of the matched entry
 			line := strings.Fields(result)
-			if len(line) < 5 {
+			if len(line) < 3 {
 				return false, fmt.Errorf("conntrack entry does not have a timeout field: %v", line)
 			}
-			timeoutSeconds, err := strconv.Atoi(line[4])
+			timeoutSeconds, err := strconv.Atoi(line[2])
 			if err != nil {
-				return false, fmt.Errorf("failed to convert matched timeout %s to integer: %v", line[4], err)
+				return false, fmt.Errorf("failed to convert matched timeout %s to integer: %v", line[2], err)
 			}
 			if math.Abs(float64(timeoutSeconds-expectedTimeoutSeconds)) < epsilonSeconds {
 				return true, nil
 			}
 			return false, fmt.Errorf("wrong TCP CLOSE_WAIT timeout: %v expected: %v", timeoutSeconds, expectedTimeoutSeconds)
 		}); err != nil {
-			framework.Failf("no conntrack entry for port %d on node %s", testDaemonTCPPort, serverNodeInfo.nodeIP)
+			framework.Failf("no valid conntrack entry for port %d on node %s: %v", testDaemonTCPPort, serverNodeInfo.nodeIP, err)
 		}
 	})
 
@@ -346,7 +322,7 @@ var _ = SIGDescribe("Network", func() {
 						Name:  "startup-script",
 						Image: imageutils.GetE2EImage(imageutils.BusyBox),
 						Command: []string{
-							"bash", "-c", "while true; do sleep 2; nc boom-server 9000& done",
+							"sh", "-c", "while true; do sleep 2; nc boom-server 9000& done",
 						},
 					},
 				},
@@ -378,22 +354,3 @@ var _ = SIGDescribe("Network", func() {
 		}
 	})
 })
-
-// fullIPv6 returns a string with the IP representation
-// if IPv6 it returns the expanded address format
-// credit https://stackoverflow.com/a/52003106/4532704
-func fullIPv6(ip net.IP) string {
-	if ip.To4() == nil {
-		dst := make([]byte, hex.EncodedLen(len(ip)))
-		_ = hex.Encode(dst, ip)
-		return string(dst[0:4]) + ":" +
-			string(dst[4:8]) + ":" +
-			string(dst[8:12]) + ":" +
-			string(dst[12:16]) + ":" +
-			string(dst[16:20]) + ":" +
-			string(dst[20:24]) + ":" +
-			string(dst[24:28]) + ":" +
-			string(dst[28:])
-	}
-	return ip.String()
-}

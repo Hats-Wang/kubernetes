@@ -31,8 +31,8 @@ import (
 
 	gcli "github.com/heketi/heketi/client/api/go-client"
 	gapi "github.com/heketi/heketi/pkg/glusterfs/api"
-	"k8s.io/klog"
-	"k8s.io/utils/mount"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 	utilstrings "k8s.io/utils/strings"
 
 	v1 "k8s.io/api/core/v1"
@@ -120,7 +120,7 @@ func (plugin *glusterfsPlugin) CanSupport(spec *volume.Spec) bool {
 		(spec.Volume != nil && spec.Volume.Glusterfs != nil)
 }
 
-func (plugin *glusterfsPlugin) RequiresRemount() bool {
+func (plugin *glusterfsPlugin) RequiresRemount(spec *volume.Spec) bool {
 	return false
 }
 
@@ -461,7 +461,7 @@ type provisionerConfig struct {
 	userKey            string
 	secretNamespace    string
 	secretName         string
-	secretValue        string
+	secretValue        string `datapolicy:"token"`
 	clusterID          string
 	gidMin             int
 	gidMax             int
@@ -1212,11 +1212,18 @@ func (plugin *glusterfsPlugin) ExpandVolumeDevice(spec *volume.Spec, newSize res
 	}
 
 	// Find out delta size
-	expansionSize := resource.NewScaledQuantity((newSize.Value() - oldSize.Value()), 0)
-	expansionSizeGiB := int(volumehelpers.RoundUpToGiB(*expansionSize))
+	expansionSize := newSize
+	expansionSize.Sub(oldSize)
+	expansionSizeGiB, err := volumehelpers.RoundUpToGiBInt(expansionSize)
+	if err != nil {
+		return oldSize, err
+	}
 
 	// Find out requested Size
-	requestGiB := volumehelpers.RoundUpToGiB(newSize)
+	requestGiB, err := volumehelpers.RoundUpToGiB(newSize)
+	if err != nil {
+		return oldSize, err
+	}
 
 	//Check the existing volume size
 	currentVolumeInfo, err := cli.VolumeInfo(volumeID)

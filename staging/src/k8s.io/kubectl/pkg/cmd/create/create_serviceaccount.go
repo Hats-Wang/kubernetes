@@ -65,6 +65,7 @@ func NewCmdCreateServiceAccount(f cmdutil.Factory, ioStreams genericclioptions.I
 	cmdutil.AddApplyAnnotationFlags(cmd)
 	cmdutil.AddValidateFlags(cmd)
 	cmdutil.AddGeneratorFlags(cmd, generateversioned.ServiceAccountV1GeneratorName)
+	cmdutil.AddFieldManagerFlagVar(cmd, &options.CreateSubcommandOptions.FieldManager, "kubectl-create")
 	return cmd
 }
 
@@ -89,4 +90,8 @@ func (o *ServiceAccountOpts) Complete(f cmdutil.Factory, cmd *cobra.Command, arg
 // Run calls the CreateSubcommandOptions.Run in ServiceAccountOpts instance
 func (o *ServiceAccountOpts) Run() error {
 	return o.CreateSubcommandOptions.Run()
+}
+
+func errUnsupportedGenerator(cmd *cobra.Command, generatorName string) error {
+	return cmdutil.UsageErrorf(cmd, "Generator %s not supported. ", generatorName)
 }

@@ -944,8 +944,6 @@ func TestMetaValues(t *testing.T) {
 		TestString: "foo",
 	}
 
-	s.Log(t)
-
 	out, err := s.ConvertToVersion(simple, externalGV)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -986,7 +984,7 @@ func TestMetaValuesUnregisteredConvert(t *testing.T) {
 
 	// Register functions to verify that scope.Meta() gets set correctly.
 	convertSimple := func(in *InternalSimple, out *ExternalSimple, scope conversion.Scope) error {
-		scope.Convert(&in.TestString, &out.TestString, 0)
+		out.TestString = in.TestString
 		internalToExternalCalls++
 		return nil
 	}
